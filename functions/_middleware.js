@@ -1,7 +1,7 @@
 export async function onRequest(context) {
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, api_token",
   };
 
@@ -9,82 +9,57 @@ export async function onRequest(context) {
     return new Response(null, { headers: corsHeaders });
   }
 
-  const newHeaders = new Headers();
+  const url = new URL(context.request.url);
   const auth = context.request.headers.get("Authorization");
-  if (auth && auth.startsWith("Bearer ")) {
-    newHeaders.set("api_token", auth.replace("Bearer ", ""));
-  }
-  
-  // 强制使用 JSON
-  newHeaders.set("Content-Type", "application/json");
+  const token = auth && auth.startsWith("Bearer ") ? auth.replace("Bearer ", "") : "";
 
-  try {
-    // 1. 发起抠图请求
-    const response = await fetch("https://api.bria.ai/v2/image/edit/remove_background", {
+  // ---------- 1. 处理 GET 请求（前端轮询查询状态） ----------
+  if (context.request.method === "GET") {
+    const statusUrl = url.searchParams.get("status_url");
+    if (!statusUrl) return new Response("Missing status_url", { status: 400, headers: corsHeaders });
+
+    // 代理去问 BRIA
+    const res = await fetch(statusUrl, { headers: { "api_token": token } });
+    const json = await res.json();
+
+    // 如果抠图完成
+    if (json.status === "succeeded" || json.status === "completed") {
+      const finalUrl = json.result?.image_url || json.result_url || json.result?.[0]?.url;
+      if (finalUrl) {
+        // 代理直接去下载原图，并以图片流返回给前端
+        const imgRes = await fetch(finalUrl);
+        const imgHeaders = new Headers();
+        imgHeaders.set("Content-Type", "image/png");
+        for (const [key, value] of Object.entries(corsHeaders)) imgHeaders.set(key, value);
+        return new Response(imgRes.body, { status: 200, headers: imgHeaders });
+      }
+    }
+    
+    // 还没处理完，原样返回状态给前端继续轮询
+    const resHeaders = new Headers();
+    for (const [key, value] of Object.entries(corsHeaders)) resHeaders.set(key, value);
+    return new Response(JSON.stringify(json), { status: res.status, headers: resHeaders });
+  }
+
+  // ---------- 2. 处理 POST 请求（前端上传图片） ----------
+  if (context.request.method === "POST") {
+    const newHeaders = new Headers();
+    if (token) newHeaders.set("api_token", token);
+    
+    // 关键优化：直接透传 FormData 的 Boundary，不再经过 Base64 转换
+    newHeaders.set("Content-Type", context.request.headers.get("Content-Type") || "");
+
+    const target = "https://api.bria.ai/v2/image/edit/remove_background";
+    const res = await fetch(target, {
       method: "POST",
       headers: newHeaders,
-      body: context.request.body,
+      body: context.request.body, // 二进制流直传，速度最快
     });
 
-    if (!response.ok) {
-      return new Response(await response.text(), { status: response.status, headers: corsHeaders });
-    }
-
-    const json = await response.json();
-    
-    // 如果 BRIA 直接返回了图片（极少情况）
-    if (json.result_url) {
-        return await fetchImageAndReturn(json.result_url, corsHeaders);
-    }
-
-    // 2. 如果返回的是异步任务凭证（status_url），开始轮询
-    if (json.status_url) {
-      const statusUrl = json.status_url;
-      let attempts = 0;
-      
-      // 最多轮询 20 次，每次间隔 1.5 秒（给大图留足时间）
-      while (attempts < 20) {
-        await new Promise(r => setTimeout(r, 1500)); // 等待 1.5 秒
-        const statusRes = await fetch(statusUrl);
-        const statusJson = await statusRes.json();
-
-        if (statusJson.status === "succeeded" || statusJson.status === "completed") {
-          const finalUrl = statusJson.result?.image_url || statusJson.result_url || statusJson.result?.[0]?.url;
-          if (finalUrl) {
-            return await fetchImageAndReturn(finalUrl, corsHeaders);
-          }
-        }
-        
-        if (statusJson.status === "failed" || statusJson.status === "error") {
-          return new Response(JSON.stringify({ error: "BRIA 处理失败", raw: statusJson }), { 
-            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-          });
-        }
-        attempts++;
-      }
-      
-      return new Response(JSON.stringify({ error: "处理超时（超过30秒）", raw: json }), { 
-        status: 504, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-      });
-    }
-
-    // 如果都不是，把原始 JSON 抛出
-    return new Response(JSON.stringify({ error: "未知的响应格式", raw: json }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
-    });
-
-  } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    const resHeaders = new Headers();
+    for (const [key, value] of Object.entries(corsHeaders)) resHeaders.set(key, value);
+    return new Response(res.body, { status: res.status, headers: resHeaders });
   }
-}
 
-// 辅助函数：下载图片并返回
-async function fetchImageAndReturn(imageUrl, corsHeaders) {
-  const imgRes = await fetch(imageUrl);
-  const imgHeaders = new Headers();
-  imgHeaders.set("Content-Type", imgRes.headers.get("content-type") || "image/png");
-  for (const [key, value] of Object.entries(corsHeaders)) imgHeaders.set(key, value);
-  return new Response(imgRes.body, { status: 200, headers: imgHeaders });
+  return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
 }
