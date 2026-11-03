@@ -23,7 +23,7 @@ export async function onRequest(context) {
     const json = await res.json();
 
     // 如果 BRIA 抠图完成
-    if (json.status === "succeeded" || json.status === "completed") {
+   if (json.status?.toUpperCase() === "SUCCEEDED" || json.status?.toUpperCase() === "COMPLETED") {
       const finalUrl = json.result?.image_url || json.result_url || json.result?.[0]?.url;
       if (finalUrl) {
         // 代理直接去把大图下载下来，以图片流返回给前端，避免前端跨域下载
