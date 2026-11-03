@@ -10,7 +10,7 @@ export async function onRequest(context) {
   }
 
   const url = new URL(context.request.url);
-  const target = "https://api-inference.huggingface.co" + url.pathname + url.search;
+  const target = "https://router.huggingface.co/hf-inference" + url.pathname + url.search;
 
   const newRequest = new Request(target, {
     method: context.request.method,
