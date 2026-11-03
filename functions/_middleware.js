@@ -9,85 +9,82 @@ export async function onRequest(context) {
     return new Response(null, { headers: corsHeaders });
   }
 
-  const target = "https://api.bria.ai/v2/image/edit/remove_background";
   const newHeaders = new Headers();
-  
   const auth = context.request.headers.get("Authorization");
   if (auth && auth.startsWith("Bearer ")) {
-     newHeaders.set("api_token", auth.replace("Bearer ", ""));
+    newHeaders.set("api_token", auth.replace("Bearer ", ""));
   }
   
-  const contentType = context.request.headers.get("Content-Type") || "application/json";
-  newHeaders.set("Content-Type", contentType);
-
-  // 读取请求体，强制添加 sync: true 参数
-  let bodyBuffer = await context.request.arrayBuffer();
-  let reqBody = bodyBuffer;
-
-  if (contentType.includes("application/json")) {
-      try {
-          let bodyText = new TextDecoder().decode(bodyBuffer);
-          let json = JSON.parse(bodyText);
-          json.sync = true; // 强制 BRIA 等待抠图完成
-          reqBody = JSON.stringify(json);
-      } catch(e) {
-          reqBody = bodyBuffer;
-      }
-  }
-
-  const newRequest = new Request(target, {
-    method: "POST",
-    headers: newHeaders,
-    body: reqBody,
-  });
+  // 强制使用 JSON
+  newHeaders.set("Content-Type", "application/json");
 
   try {
-    const response = await fetch(newRequest);
-    
+    // 1. 发起抠图请求
+    const response = await fetch("https://api.bria.ai/v2/image/edit/remove_background", {
+      method: "POST",
+      headers: newHeaders,
+      body: context.request.body,
+    });
+
     if (!response.ok) {
-      const errText = await response.text();
-      return new Response(errText, { status: response.status, headers: corsHeaders });
+      return new Response(await response.text(), { status: response.status, headers: corsHeaders });
     }
 
-    const resContentType = response.headers.get("content-type") || "";
-    
-    // 如果 BRIA 直接返回了图片流
-    if (resContentType.includes("image")) {
-      const resHeaders = new Headers(response.headers);
-      for (const [key, value] of Object.entries(corsHeaders)) resHeaders.set(key, value);
-      return new Response(response.body, { status: 200, headers: resHeaders });
-    }
-
-    // 如果是 JSON，解析里面的图片链接
     const json = await response.json();
     
-    let imageUrl = json.result_url || json.image_url;
-    if (!imageUrl && Array.isArray(json)) {
-       imageUrl = json[0]?.result_url || json[0]?.image_url || json[0]?.url;
-    }
-    if (!imageUrl && json.result) {
-       imageUrl = json.result.image_url || json.result[0]?.url || json.result[0]?.image_url;
+    // 如果 BRIA 直接返回了图片（极少情况）
+    if (json.result_url) {
+        return await fetchImageAndReturn(json.result_url, corsHeaders);
     }
 
-    // 找到链接，代理直接下载图片并返回给前端
-    if (imageUrl) {
-      const imgRes = await fetch(imageUrl);
-      const imgHeaders = new Headers();
-      imgHeaders.set("Content-Type", imgRes.headers.get("content-type") || "image/png");
-      for (const [key, value] of Object.entries(corsHeaders)) imgHeaders.set(key, value);
-      return new Response(imgRes.body, { status: 200, headers: imgHeaders });
+    // 2. 如果返回的是异步任务凭证（status_url），开始轮询
+    if (json.status_url) {
+      const statusUrl = json.status_url;
+      let attempts = 0;
+      
+      // 最多轮询 20 次，每次间隔 1.5 秒（给大图留足时间）
+      while (attempts < 20) {
+        await new Promise(r => setTimeout(r, 1500)); // 等待 1.5 秒
+        const statusRes = await fetch(statusUrl);
+        const statusJson = await statusRes.json();
+
+        if (statusJson.status === "succeeded" || statusJson.status === "completed") {
+          const finalUrl = statusJson.result?.image_url || statusJson.result_url || statusJson.result?.[0]?.url;
+          if (finalUrl) {
+            return await fetchImageAndReturn(finalUrl, corsHeaders);
+          }
+        }
+        
+        if (statusJson.status === "failed" || statusJson.status === "error") {
+          return new Response(JSON.stringify({ error: "BRIA 处理失败", raw: statusJson }), { 
+            status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } 
+          });
+        }
+        attempts++;
+      }
+      
+      return new Response(JSON.stringify({ error: "处理超时（超过30秒）", raw: json }), { 
+        status: 504, headers: { ...corsHeaders, "Content-Type": "application/json" } 
+      });
     }
 
-    // 如果还是找不到，把 BRIA 原原本本的返回内容吐出来，方便排查
-    return new Response(JSON.stringify({ error: "未找到图片链接", raw: json }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" }
+    // 如果都不是，把原始 JSON 抛出
+    return new Response(JSON.stringify({ error: "未知的响应格式", raw: json }), {
+      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
 
   } catch (error) {
     return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
+}
+
+// 辅助函数：下载图片并返回
+async function fetchImageAndReturn(imageUrl, corsHeaders) {
+  const imgRes = await fetch(imageUrl);
+  const imgHeaders = new Headers();
+  imgHeaders.set("Content-Type", imgRes.headers.get("content-type") || "image/png");
+  for (const [key, value] of Object.entries(corsHeaders)) imgHeaders.set(key, value);
+  return new Response(imgRes.body, { status: 200, headers: imgHeaders });
 }
