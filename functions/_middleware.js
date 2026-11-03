@@ -9,21 +9,20 @@ export async function onRequest(context) {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // 1. 目标锁定为 BRIA 官方抠图接口
-  const target = "https://api.bria.ai/v1/remove-background";
+  // 1. 目标锁定为 BRIA 官方 v2 抠图接口
+  const target = "https://api.bria.ai/v2/image/edit/remove_background";
   
   const newHeaders = new Headers();
   
-  // 2. 从前端获取你填写的 Token，并转换为 BRIA 要求的 api_token 请求头
+  // 2. 从前端获取 Token，并转换为 BRIA 要求的 api_token 请求头
   const auth = context.request.headers.get("Authorization");
   if (auth && auth.startsWith("Bearer ")) {
      newHeaders.set("api_token", auth.replace("Bearer ", ""));
   }
   
-  // 3. 保持图片类型
-  newHeaders.set("Content-Type", context.request.headers.get("Content-Type") || "image/png");
+  // 3. v2 接口通常期望 JSON 或 multipart，这里根据你前端发送的方式设置
+  newHeaders.set("Content-Type", context.request.headers.get("Content-Type") || "application/json");
 
-  // 4. 发起请求给 BRIA
   const newRequest = new Request(target, {
     method: "POST",
     headers: newHeaders,
